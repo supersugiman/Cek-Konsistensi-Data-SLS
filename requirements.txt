@@ -1,0 +1,5 @@
+pandas
+openpyxl
+geopandas
+PyQt6
+fiona
