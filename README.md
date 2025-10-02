@@ -11,4 +11,4 @@ Izin Admin : Jika folder tujuan yang dipilih memerlukan izin admin (misal: C:\Pr
 
 Python Tidak Perlu Diinstal	: Tidak perlu Python, pip, atau library apa pun di PC tujuan. Semua sudah dikemas di .exe.
 
-https://github.com/supersugiman/Cek-Konsistensi-Data-SLS/blob/e7bd30315adaa21cf346f9229d9c0feb958d509e/Aplikasi%20Pengecek%20Konsistensi%20Data%20SLS.jpg
+![Image Alt](https://github.com/supersugiman/Cek-Konsistensi-Data-SLS/blob/e7bd30315adaa21cf346f9229d9c0feb958d509e/Aplikasi%20Pengecek%20Konsistensi%20Data%20SLS.jpg) 
