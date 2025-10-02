@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from pathlib import Path
+from collections import Counter
 
 # --- Worker Thread untuk proses pengecekan ---
 class CheckWorker(QThread):
@@ -36,10 +37,21 @@ class CheckWorker(QThread):
             df_master = pd.read_excel(self.excel_path, dtype={'idsubsls': str, 'kdsubsls': str, 'nmsls': str})
             master_data = {}
             master_digit_issues = []
+            master_duplicates = []
+            
+            # Cek duplikasi di Excel
+            excel_idsubsls_list = [str(row['idsubsls']).strip() for index, row in df_master.iterrows() if pd.notna(row['idsubsls'])]
+            excel_duplicate_counter = Counter(excel_idsubsls_list)
+            excel_duplicates = {id: count for id, count in excel_duplicate_counter.items() if count > 1}
             
             for index, row in df_master.iterrows():
                 idsubsls_key = str(row['idsubsls']).strip()
                 kdsubsls_master = str(row['kdsubsls']).strip()
+                
+                # Cek apakah idsubsls duplikat di Excel
+                is_excel_duplicate = idsubsls_key in excel_duplicates
+                if is_excel_duplicate:
+                    master_duplicates.append(idsubsls_key)
                 
                 # Cek digit kdsubsls di Excel
                 if kdsubsls_master != '' and kdsubsls_master != '00':
@@ -58,12 +70,15 @@ class CheckWorker(QThread):
                 master_data[idsubsls_key] = {
                     'nmsls': str(row['nmsls']).strip(),
                     'kdsubsls': kdsubsls_normalized,  # Simpan yang sudah dinormalisasi
-                    'kdsubsls_original': kdsubsls_master  # Simpan versi original untuk comparison
+                    'kdsubsls_original': kdsubsls_master,  # Simpan versi original untuk comparison
+                    'is_duplicate': is_excel_duplicate  # Flag duplikasi
                 }
             
             self.progress.emit(f"Berhasil memuat {len(master_data)} baris dari Master Excel.")
             if master_digit_issues:
                 self.progress.emit(f"Peringatan: Ditemukan {len(master_digit_issues)} issue digit kdsubsls di Excel")
+            if excel_duplicates:
+                self.progress.emit(f"Peringatan: Ditemukan {len(excel_duplicates)} IDSUBSLS duplikat di Excel")
 
             # --- LANGKAH 2: Baca file GeoPackage ---
             self.progress.emit("Membaca file GeoPackage...")
@@ -73,6 +88,13 @@ class CheckWorker(QThread):
             all_results = []
             gpkg_idsubsls_set = set()
             gpkg_digit_issues = []
+            gpkg_duplicates = []
+            
+            # Cek duplikasi di GPKG
+            gpkg_idsubsls_list = [str(feature.get('idsubsls')).strip() for index, feature in gdf.iterrows() 
+                                 if feature.get('idsubsls') and pd.notna(feature.get('idsubsls'))]
+            gpkg_duplicate_counter = Counter(gpkg_idsubsls_list)
+            gpkg_duplicates = {id: count for id, count in gpkg_duplicate_counter.items() if count > 1}
             
             self.progress.emit("Memulai perbandingan data...")
             total_rows = len(gdf)
@@ -90,6 +112,11 @@ class CheckWorker(QThread):
                 
                 gpkg_idsubsls = str(gpkg_idsubsls).strip()
                 gpkg_idsubsls_set.add(gpkg_idsubsls)
+                
+                # Cek apakah idsubsls duplikat di GPKG
+                is_gpkg_duplicate = gpkg_idsubsls in gpkg_duplicates
+                if is_gpkg_duplicate:
+                    gpkg_duplicates[gpkg_idsubsls] = gpkg_duplicates.get(gpkg_idsubsls, 0) + 1
                 
                 gpkg_nmsls = str(feature.get('nmsls', '') or '').strip()
                 gpkg_kdsubsls_raw = feature.get('kdsubsls', '')
@@ -125,6 +152,7 @@ class CheckWorker(QThread):
                     'KDSUBSLS_GPKG_ORIGINAL': gpkg_kdsubsls_original,  # Simpan original untuk referensi
                     'KDSUBSLS_MASTER': '',
                     'KDSUBSLS_MASTER_ORIGINAL': '',
+                    'Duplikasi_idsubsls': 'Duplikat' if is_gpkg_duplicate else 'Non Duplikasi',
                     'Status': ''
                 }
 
@@ -133,6 +161,12 @@ class CheckWorker(QThread):
                     result_row['NMSLS_MASTER'] = master_record['nmsls']
                     result_row['KDSUBSLS_MASTER'] = master_record['kdsubsls']  # Yang sudah dinormalisasi
                     result_row['KDSUBSLS_MASTER_ORIGINAL'] = master_record['kdsubsls_original']  # Original dari Excel
+                    
+                    # Jika duplikat di Excel, update status duplikasi
+                    if master_record['is_duplicate']:
+                        result_row['Duplikasi_idsubsls'] = 'Duplikat (Excel & GPKG)' if is_gpkg_duplicate else 'Duplikat (Excel)'
+                    elif is_gpkg_duplicate:
+                        result_row['Duplikasi_idsubsls'] = 'Duplikat (GPKG)'
                     
                     issues = []
                     if gpkg_nmsls != master_record['nmsls']:
@@ -145,6 +179,8 @@ class CheckWorker(QThread):
                     result_row['Status'] = ', '.join(issues) if issues else 'Sesuai'
                 else:
                     result_row['Status'] = 'Tidak Ditemukan di Master'
+                    if is_gpkg_duplicate:
+                        result_row['Duplikasi_idsubsls'] = 'Duplikat (GPKG)'
                 
                 all_results.append(result_row)
             
@@ -155,6 +191,8 @@ class CheckWorker(QThread):
             
             for idsubsls in missing_in_gpkg:
                 master_record = master_data[idsubsls]
+                duplikasi_status = 'Duplikat (Excel)' if master_record['is_duplicate'] else 'Non Duplikasi'
+                
                 all_results.append({
                     'IDSUB_SLS': idsubsls,
                     'NMSLS_GPKG': '',
@@ -163,6 +201,7 @@ class CheckWorker(QThread):
                     'KDSUBSLS_GPKG_ORIGINAL': '',
                     'KDSUBSLS_MASTER': master_record['kdsubsls'],
                     'KDSUBSLS_MASTER_ORIGINAL': master_record['kdsubsls_original'],
+                    'Duplikasi_idsubsls': duplikasi_status,
                     'Status': 'Tidak Ditemukan di GeoPackage'
                 })
 
@@ -175,6 +214,7 @@ class CheckWorker(QThread):
                 'KDSUBSLS_GPKG_ORIGINAL': '',
                 'KDSUBSLS_MASTER': f"Total issue Excel: {len(master_digit_issues)}",
                 'KDSUBSLS_MASTER_ORIGINAL': '',
+                'Duplikasi_idsubsls': '',
                 'Status': 'Laporan Digit'
             }
             all_results.append(digit_issues_result)
@@ -189,6 +229,7 @@ class CheckWorker(QThread):
                     'KDSUBSLS_GPKG_ORIGINAL': '',
                     'KDSUBSLS_MASTER': '',
                     'KDSUBSLS_MASTER_ORIGINAL': '',
+                    'Duplikasi_idsubsls': '',
                     'Status': 'Issue Digit GPKG'
                 })
             
@@ -201,7 +242,50 @@ class CheckWorker(QThread):
                     'KDSUBSLS_GPKG_ORIGINAL': '',
                     'KDSUBSLS_MASTER': issue,
                     'KDSUBSLS_MASTER_ORIGINAL': '',
+                    'Duplikasi_idsubsls': '',
                     'Status': 'Issue Digit Excel'
+                })
+            
+            # Simpan informasi duplikasi ke results
+            duplikasi_result = {
+                'IDSUB_SLS': '=== LAPORAN DUPLIKASI IDSUB_SLS ===',
+                'NMSLS_GPKG': '',
+                'NMSLS_MASTER': '',
+                'KDSUBSLS_GPKG': f"Total duplikat GPKG: {len(gpkg_duplicates)}",
+                'KDSUBSLS_GPKG_ORIGINAL': '',
+                'KDSUBSLS_MASTER': f"Total duplikat Excel: {len(excel_duplicates)}",
+                'KDSUBSLS_MASTER_ORIGINAL': '',
+                'Duplikasi_idsubsls': '',
+                'Status': 'Laporan Duplikasi'
+            }
+            all_results.append(duplikasi_result)
+            
+            # Tambahkan detail duplikasi GPKG
+            for duplicate_id, count in list(gpkg_duplicates.items())[:10]:
+                all_results.append({
+                    'IDSUB_SLS': duplicate_id,
+                    'NMSLS_GPKG': f"Duplikat {count} kali di GPKG",
+                    'NMSLS_MASTER': '',
+                    'KDSUBSLS_GPKG': '',
+                    'KDSUBSLS_GPKG_ORIGINAL': '',
+                    'KDSUBSLS_MASTER': '',
+                    'KDSUBSLS_MASTER_ORIGINAL': '',
+                    'Duplikasi_idsubsls': 'Duplikat (GPKG)',
+                    'Status': 'Detail Duplikasi'
+                })
+            
+            # Tambahkan detail duplikasi Excel
+            for duplicate_id, count in list(excel_duplicates.items())[:10]:
+                all_results.append({
+                    'IDSUB_SLS': duplicate_id,
+                    'NMSLS_GPKG': '',
+                    'NMSLS_MASTER': f"Duplikat {count} kali di Excel",
+                    'KDSUBSLS_GPKG': '',
+                    'KDSUBSLS_GPKG_ORIGINAL': '',
+                    'KDSUBSLS_MASTER': '',
+                    'KDSUBSLS_MASTER_ORIGINAL': '',
+                    'Duplikasi_idsubsls': 'Duplikat (Excel)',
+                    'Status': 'Detail Duplikasi'
                 })
 
             self.finished.emit(all_results)
@@ -348,8 +432,8 @@ class MainWindow(QMainWindow):
         self.results_data = results
         self.update_log("\n--- Pengecekan Selesai ---")
 
-        # Filter hanya hasil pengecekan data (bukan laporan digit)
-        data_results = [r for r in results if 'ISSUE DIGIT' not in r['IDSUB_SLS'] and 'Issue Digit' not in r['Status']]
+        # Filter hanya hasil pengecekan data (bukan laporan digit/duplikasi)
+        data_results = [r for r in results if 'ISSUE DIGIT' not in r['IDSUB_SLS'] and 'LAPORAN DUPLIKASI' not in r['IDSUB_SLS'] and 'Issue Digit' not in r['Status'] and 'Detail Duplikasi' not in r['Status']]
         mismatches = [row for row in data_results if row['Status'] != 'Sesuai']
 
         # Hitung statistik
@@ -359,6 +443,12 @@ class MainWindow(QMainWindow):
         tidak_ditemukan_gpkg = len([r for r in data_results if r['Status'] == 'Tidak Ditemukan di GeoPackage'])
         beda_nmsls = len([r for r in data_results if 'Beda NMSLS' in r['Status']])
         beda_kdsubsls = len([r for r in data_results if 'Beda KdSubSLS' in r['Status']])
+        
+        # Hitung duplikasi
+        duplikat_gpkg = len([r for r in data_results if 'Duplikat (GPKG)' in r['Duplikasi_idsubsls']])
+        duplikat_excel = len([r for r in data_results if 'Duplikat (Excel)' in r['Duplikasi_idsubsls']])
+        duplikat_keduanya = len([r for r in data_results if 'Duplikat (Excel & GPKG)' in r['Duplikasi_idsubsls']])
+        total_duplikat = duplikat_gpkg + duplikat_excel + duplikat_keduanya
 
         # Tampilkan summary
         self.results_text.append(f"\n=== SUMMARY HASIL ===")
@@ -368,16 +458,27 @@ class MainWindow(QMainWindow):
         self.results_text.append(f"Tidak Ditemukan di GeoPackage: {tidak_ditemukan_gpkg}")
         self.results_text.append(f"Beda NMSLS: {beda_nmsls}")
         self.results_text.append(f"Beda KdSubSLS: {beda_kdsubsls}")
+        self.results_text.append(f"Duplikat IDSUBSLS: {total_duplikat}")
+        self.results_text.append(f"  - Duplikat di GPKG: {duplikat_gpkg}")
+        self.results_text.append(f"  - Duplikat di Excel: {duplikat_excel}")
+        self.results_text.append(f"  - Duplikat di Keduanya: {duplikat_keduanya}")
 
-        if not mismatches:
-            self.results_text.append("\nSELAMAT! Semua data konsisten.")
+        if not mismatches and total_duplikat == 0:
+            self.results_text.append("\nSELAMAT! Semua data konsisten dan tidak ada duplikasi.")
         else:
-            self.results_text.append(f"\nDitemukan {len(mismatches)} ketidakcocokan data:")
-            # Tampilkan beberapa contoh di log
-            for i, mismatch in enumerate(mismatches[:20], 1):
-                 self.results_text.append(f"{i}. IDSUB_SLS {mismatch['IDSUB_SLS']}: {mismatch['Status']}")
-            if len(mismatches) > 20:
-                self.results_text.append("...")
+            issues_count = len(mismatches) + total_duplikat
+            self.results_text.append(f"\nDitemukan {issues_count} masalah:")
+            
+            if mismatches:
+                self.results_text.append(f"- {len(mismatches)} ketidakcocokan data")
+                # Tampilkan beberapa contoh di log
+                for i, mismatch in enumerate(mismatches[:10], 1):
+                    self.results_text.append(f"  {i}. IDSUB_SLS {mismatch['IDSUB_SLS']}: {mismatch['Status']}")
+            
+            if total_duplikat > 0:
+                self.results_text.append(f"- {total_duplikat} duplikasi IDSUBSLS")
+                
+            if len(mismatches) > 10 or total_duplikat > 0:
                 self.results_text.append("\n(Hasil selengkapnya dapat diekspor ke CSV)")
 
         self.export_csv_btn.setEnabled(True)
